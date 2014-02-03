@@ -6,6 +6,7 @@ import corehq.apps.receiverwrapper.reports as receiverwrapper
 import phonelog.reports as phonelog
 from corehq.apps.reports.commtrack import standard as commtrack_reports
 from corehq.apps.reports.commtrack import maps as commtrack_maps
+from corehq.apps.fixtures.interface import FixtureViewInterface, FixtureEditInterface
 from corehq.apps.reports.commconnect import system_overview
 import hashlib
 from dimagi.utils.modules import to_function
@@ -130,6 +131,13 @@ EDIT_DATA_INTERFACES = (
     (ugettext_lazy('Edit Data'), (
         CaseReassignmentInterface,
         ImportCases
+    )),
+)
+
+FIXTURE_INTERFACES = (
+    (_('Lookup Tables'), (
+        FixtureEditInterface,
+        FixtureViewInterface,
     )),
 )
 
