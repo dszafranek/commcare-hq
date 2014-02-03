@@ -7,17 +7,18 @@ this more general and subclass for montly reports , but I'm holding off on
 that until we actually have another use case for it.
 """
 import datetime
-
-from corehq.apps.reports.generic import GenericTabularReport
-from corehq.apps.reports.standard import CustomProjectReport, MonthYearMixin 
-from corehq.apps.reports.datatables import DataTablesHeader, DataTablesColumn, DataTablesColumnGroup
-from corehq.apps.reports.filters.select import SelectOpenCloseFilter
-from corehq.apps.users.models import CommCareUser, CommCareCase
-from dimagi.utils.couch.database import get_db
-from dimagi.utils.decorators.memoized import memoized
-from dimagi.utils.dates import DateSpan
-
+import re
 from couchdbkit.exceptions import ResourceNotFound
+from sqlagg.columns import SimpleColumn, SumColumn
+from corehq.apps.reports.datatables import DataTablesHeader, DataTablesColumn
+from corehq.apps.reports.filters.dates import DatespanFilter
+
+from corehq.apps.reports.sqlreport import SqlTabularReport, DatabaseColumn, SqlData, SummingSqlTabularReport
+from corehq.apps.reports.standard import CustomProjectReport, MonthYearMixin, DatespanMixin
+from corehq.apps.reports.filters.select import SelectOpenCloseFilter
+from corehq.apps.users.models import CommCareCase
+from dimagi.utils.dates import DateSpan
+from custom.opm.opm_reports.health_status import HealthStatus
 
 from ..opm_tasks.models import OpmReportSnapshot
 from .beneficiary import Beneficiary
@@ -26,7 +27,184 @@ from .constants import *
 from .filters import BlockFilter, AWCFilter
 
 
-class BaseReport(MonthYearMixin, GenericTabularReport, CustomProjectReport):
+class OpmCaseSqlData(SqlData):
+
+    table_name = "fluff_OpmCaseFluff"
+
+    def __init__(self, domain, user_id, datespan):
+        self.domain = domain
+        self.user_id = user_id
+        self.datespan = datespan
+
+    @property
+    def filter_values(self):
+
+        return dict(
+            domain=self.domain,
+            user_id=self.user_id,
+            startdate=self.datespan.startdate_param_utc,
+            enddate=self.datespan.enddate_param_utc
+        )
+
+    @property
+    def group_by(self):
+        return ['user_id']
+
+    @property
+    def filters(self):
+        filters = [
+            "domain = :domain",
+            "user_id = :user_id",
+            "date between :startdate and :enddate"
+        ]
+
+        return filters
+
+    @property
+    def columns(self):
+        return [
+            DatabaseColumn("User ID", SimpleColumn("user_id")),
+            DatabaseColumn("Women registered", SumColumn("women_registered_total")),
+            DatabaseColumn("Children registered", SumColumn("children_registered_total"))
+        ]
+
+    @property
+    def data(self):
+        if self.user_id in super(OpmCaseSqlData, self).data:
+            return super(OpmCaseSqlData, self).data[self.user_id]
+        else:
+            return None
+
+
+class OpmFormSqlData(SqlData):
+
+    table_name = "fluff_OpmFormFluff"
+
+    def __init__(self, domain, case_id, datespan):
+        self.domain = domain
+        self.case_id = case_id
+        self.datespan = datespan
+
+    @property
+    def filter_values(self):
+
+        return dict(
+            domain=self.domain,
+            case_id=self.case_id,
+            startdate=self.datespan.startdate_param_utc,
+            enddate=self.datespan.enddate_param_utc
+        )
+
+    @property
+    def group_by(self):
+        return ['case_id']
+
+    @property
+    def filters(self):
+        filters = [
+            "domain = :domain",
+            "date between :startdate and :enddate"
+        ]
+        if self.case_id:
+            filters.append("case_id = :case_id")
+        return filters
+
+    @property
+    def columns(self):
+        return [
+            DatabaseColumn("Case ID", SimpleColumn("case_id")),
+            DatabaseColumn("Bp1 Cash Total", SumColumn("bp1_cash_total")),
+            DatabaseColumn("Bp2 Cash Total", SumColumn("bp2_cash_total")),
+            DatabaseColumn("Child Followup Total", SumColumn("child_followup_total")),
+            DatabaseColumn("Child Spacing Deliveries", SumColumn("child_spacing_deliveries")),
+            DatabaseColumn("Delivery Total", SumColumn("delivery_total")),
+            DatabaseColumn("Growth Monitoring Total", SumColumn("growth_monitoring_total")),
+            DatabaseColumn("Service Forms Total", SumColumn("service_forms_total")),
+        ]
+
+    @property
+    def data(self):
+        if self.case_id is None:
+            return super(OpmFormSqlData, self).data
+        if self.case_id in super(OpmFormSqlData, self).data:
+            return super(OpmFormSqlData, self).data[self.case_id]
+        else:
+            return None
+
+class OpmHealthStatusSqlData(SqlData):
+
+    table_name = 'fluff_OpmHealthStatusFluff'
+
+    def __init__(self, domain, user_id, datespan):
+        self.domain = domain
+        self.user_id = user_id
+        self.datespan = datespan
+
+    @property
+    def filter_values(self):
+        return dict(
+            domain=self.domain,
+            user_id=self.user_id,
+            startdate=self.datespan.startdate_param_utc,
+            enddate=self.datespan.enddate_param_utc
+        )
+
+    @property
+    def group_by(self):
+        return ['user_id']
+
+    @property
+    def filters(self):
+        filters = [
+            "domain = :domain",
+            "user_id = :user_id",
+            "date between :startdate and :enddate"
+        ]
+
+        return filters
+
+
+    @property
+    def columns(self):
+        return [
+            DatabaseColumn('# of Beneficiaries Registered', SumColumn('beneficiaries_registered_total')),
+            DatabaseColumn('# of Pregnant Women Registered', SumColumn('lmp_total')),
+            DatabaseColumn('# of Lactating Mothers Registered', SumColumn('lactating_total')),
+            DatabaseColumn('# of Children Between 0 and 3 Years of Age Registered', SumColumn('children_total')),
+            DatabaseColumn('# of Beneficiaries Attending VHND Monthly', SumColumn('vhnd_monthly_total')),
+            DatabaseColumn('# of Pregnant Women Who Have Received at least 30 IFA Tablets', SumColumn('ifa_tablets_total')),
+            DatabaseColumn('# of Pregnant Women Whose Weight Gain Was Monitored At Least Once', SumColumn('weight_once_total')),
+            DatabaseColumn('# of Pregnant Women Whose Weight Gain Was Monitored Twice', SumColumn('weight_twice_total')),
+            DatabaseColumn('# of Children Whose Weight Was Monitored at Birth', SumColumn('children_monitored_at_birth_total')),
+            DatabaseColumn('# of Children Whose Birth Was Registered', SumColumn('children_registered_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 1 Growth Monitoring Session', SumColumn('growth_monitoring_session_1_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 2 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_2_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 3 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_3_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 4 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_4_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 5 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_5_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 6 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_6_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 7 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_7_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 8 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_8_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 9 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_9_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 10 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_10_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 11 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_11_total')),
+            DatabaseColumn('# of Children Who Have Attended At Least 12 Growth Monitoring Sessions', SumColumn('growth_monitoring_session_12_total')),
+            DatabaseColumn('# of Children Whose Nutritional Status is Normal', SumColumn('nutritional_status_normal_total')),
+            DatabaseColumn('# of Children Whose Nutritional Status is "MAM"', SumColumn('nutritional_status_mam_total')),
+            DatabaseColumn('# of Children Whose Nutritional Status is "SAM"', SumColumn('nutritional_status_sam_total')),
+            DatabaseColumn('# of Children Who Have Received ORS and Zinc Treatment if He/She Contracts Diarrhea', SumColumn('treated_total')),
+            DatabaseColumn('# of Lactating Mothers Who Reported to Have Exclusively Breastfed Their Children for First 6 Months', SumColumn('excbreastfed_total')),
+            DatabaseColumn('# of Children Who Received Measles Vaccine', SumColumn('measlesvacc_total')),
+        ]
+
+    @property
+    def data(self):
+        if self.user_id in super(OpmHealthStatusSqlData, self).data:
+            return super(OpmHealthStatusSqlData, self).data[self.user_id]
+        else:
+            return None
+
+class BaseReport(MonthYearMixin, SqlTabularReport, CustomProjectReport):
     """
     Report parent class.  Children must provide a get_rows() method that
     returns a list of the raw data that forms the basis of each row.
@@ -74,6 +252,7 @@ class BaseReport(MonthYearMixin, GenericTabularReport, CustomProjectReport):
             return None
         return OpmReportSnapshot.from_view(self)
 
+
     @property
     def headers(self):
         if self.snapshot is not None:
@@ -92,7 +271,7 @@ class BaseReport(MonthYearMixin, GenericTabularReport, CustomProjectReport):
             return self.snapshot.rows
         rows = []
         for row in self.row_objects:
-            rows.append([getattr(row, method) for 
+            rows.append([getattr(row, method) for
                 method, header in self.model.method_map])
         return rows
 
@@ -111,7 +290,7 @@ class BaseReport(MonthYearMixin, GenericTabularReport, CustomProjectReport):
         rows = []
         for row in self.get_rows(self.datespan):
             try:
-                rows.append(self.model(row, self))
+                rows.append(self.get_row_data(row))
             except InvalidRow:
                 pass
         return rows
@@ -144,9 +323,16 @@ class BeneficiaryPaymentReport(BaseReport):
     def fields(self):
         return super(BeneficiaryPaymentReport, self).fields + [SelectOpenCloseFilter]
 
-    # TODO: Switch to ES.  Peformance aaah!
+    # TODO: Switch to ES. Peformance aaah!
     def get_rows(self, datespan):
-        cases = CommCareCase.get_all_cases(DOMAIN, include_docs=True)
+        cases = []
+        self.form_sql_data = OpmFormSqlData(domain=DOMAIN, case_id=None, datespan=self.datespan)
+        for case_id in self.form_sql_data.data.keys():
+            try:
+                cases.append(CommCareCase.get(case_id))
+            except ResourceNotFound:
+                pass
+
         return [case for case in cases if self.passes_filter(case)]
 
     def passes_filter(self, case):
@@ -158,6 +344,9 @@ class BeneficiaryPaymentReport(BaseReport):
                 return True
             return False
         return True
+
+    def get_row_data(self, row):
+        return self.model(row, self, self.form_sql_data.data.__getitem__(row._id))
 
 
 class IncentivePaymentReport(BaseReport):
@@ -183,6 +372,11 @@ class IncentivePaymentReport(BaseReport):
 
     def get_rows(self, datespan):
         return CommCareUser.by_domain(DOMAIN)
+
+    def get_row_data(self, row):
+        case_sql_data = OpmCaseSqlData(DOMAIN, row._id, self.datespan)
+        form_sql_data = OpmFormSqlData(DOMAIN, row._id, self.datespan)
+        return self.model(row, self, case_sql_data.data, form_sql_data.data)
 
 
 def last_if_none(month, year):
@@ -228,3 +422,52 @@ def get_report(ReportClass, month=None, year=None):
             return {}
 
     return Report()
+
+class HealthStatusReport(DatespanMixin, BaseReport, SummingSqlTabularReport):
+
+    name = "Health Status Report"
+    slug = "health_status_report"
+    model = HealthStatus
+
+    def passes_filter(self, case):
+        if case.type.upper() == "PREGNANCY":
+            return True
+        else:
+            return False
+
+    @property
+    def rows(self):
+        ret = list(super(HealthStatusReport, self).rows)
+        self.total_row = calculate_total_row(ret)
+        return ret
+
+    @property
+    def fields(self):
+        return [BlockFilter, AWCFilter, SelectOpenCloseFilter, DatespanFilter]
+
+    def get_rows(self, dataspan):
+        return CommCareUser.by_domain(DOMAIN)
+
+    def get_row_data(self, row):
+        sql_data = OpmHealthStatusSqlData(DOMAIN, row._id, self.datespan)
+        return self.model(row, self, sql_data.data)
+
+
+def calculate_total_row(rows):
+    regexp = re.compile('(.*?)>([0-9]+)<.*')
+    total_row = []
+    if len(rows) > 0:
+        num_cols = len(rows[0])
+        for i in range(num_cols):
+            colrows = [cr[i] for cr in rows]
+            if i == 0:
+                total_row.append("Total:")
+            else:
+                columns = [int(regexp.match(r).group(2)) for r in colrows]
+                if len(columns):
+                    total_row.append("<span style='display: block; text-align:center;'>%s</span>" % reduce(lambda x, y: x + y, columns, 0))
+                else:
+                    total_row.append('')
+
+    return total_row
+
